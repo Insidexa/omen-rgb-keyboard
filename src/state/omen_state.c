@@ -15,6 +15,7 @@
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
 
+#include "omen_file.h"
 #include "omen_state.h"
 #include "omen_zones.h"
 #include "omen_animations.h"
@@ -46,7 +47,7 @@ static void save_animation_state_work(struct work_struct *work)
 	 * Runs in kworker context (kernel creds). Sysfs callers cannot write
 	 * the root-owned state file directly (EACCES).
 	 */
-	fp = filp_open(STATE_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	fp = omen_filp_open(STATE_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (IS_ERR(fp)) {
 		pr_warn("Failed to save animation state: %ld\n", PTR_ERR(fp));
 		return;
@@ -111,7 +112,7 @@ static void omen_read_file_work(struct work_struct *work)
 	struct file *fp;
 	loff_t pos = 0;
 
-	fp = filp_open(rw->path, O_RDONLY, 0);
+	fp = omen_filp_open(rw->path, O_RDONLY, 0);
 	if (IS_ERR(fp)) {
 		rw->ret = PTR_ERR(fp);
 		return;

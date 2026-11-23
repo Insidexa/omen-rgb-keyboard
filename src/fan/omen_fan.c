@@ -52,6 +52,7 @@
 #include <linux/platform_profile.h>
 #endif
 
+#include "omen_file.h"
 #include "omen_fan.h"
 #include "omen_state.h"
 #include "omen_wmi.h"
@@ -1356,7 +1357,7 @@ static void fan_persist_work_fn(struct work_struct *work)
 	fan_persist_pending_valid = false;
 	mutex_unlock(&fan_persist_mutex);
 
-	fp = filp_open(FAN_STATE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	fp = omen_filp_open(FAN_STATE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (IS_ERR(fp)) {
 		pr_warn("fan state save failed: %ld\n", PTR_ERR(fp));
 		return;
@@ -2330,7 +2331,7 @@ static void fan_max_rpm_save_work(struct work_struct *work)
 	fan_max_rpm_save_pending = false;
 	mutex_unlock(&fan_max_rpm_mutex);
 
-	fp = filp_open(FAN_MAX_RPM_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	fp = omen_filp_open(FAN_MAX_RPM_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (IS_ERR(fp)) {
 		pr_warn("max rpm save failed: %ld\n", PTR_ERR(fp));
 		return;
