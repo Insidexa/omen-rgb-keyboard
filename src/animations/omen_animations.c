@@ -462,6 +462,14 @@ void animation_stop(void)
 	}
 }
 
+/* Stop the animation without restoring the saved colours (live frames take over). */
+void animation_halt(void)
+{
+	animation_active = false;
+	timer_delete_sync(&animation_timer);
+	cancel_work_sync(&animation_work);
+}
+
 void animation_set_mode(enum animation_mode mode)
 {
 	current_animation = mode;

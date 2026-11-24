@@ -76,6 +76,9 @@ struct platform_zone *match_zone(struct device_attribute *attr)
 	return NULL;
 }
 
+/* Set by frame writes; any other lighting write may change the bytes it caches. */
+static bool frame_state_valid;
+
 int fourzone_update_led(struct platform_zone *zone, enum hp_wmi_command rw)
 {
 	u8 state[128];
@@ -92,6 +95,7 @@ int fourzone_update_led(struct platform_zone *zone, enum hp_wmi_command rw)
 	}
 
 	if (rw == HPWMI_WRITE) {
+		frame_state_valid = false;
 		state[zone->offset + 0] = zone->colors.red;
 		state[zone->offset + 1] = zone->colors.green;
 		state[zone->offset + 2] = zone->colors.blue;
@@ -228,9 +232,13 @@ ssize_t zone_set(struct device *dev, struct device_attribute *attr,
 	animation_stop();
 	animation_set_mode(ANIMATION_STATIC);
 
-	target_zone->colors.red = (target_zone->colors.red * global_brightness) / 100;
-	target_zone->colors.green = (target_zone->colors.green * global_brightness) / 100;
-	target_zone->colors.blue = (target_zone->colors.blue * global_brightness) / 100;
+	/*
+	 * animation_stop() has already written every zone from original_colors
+	 * with the brightness applied, this one included: start from the
+	 * original again, or the brightness would be applied twice.
+	 */
+	target_zone->colors = original_colors[zone_idx].colors;
+	apply_brightness_to_color(&target_zone->colors);
 
 	ret = fourzone_update_led(target_zone, HPWMI_WRITE);
 	if (ret)
@@ -401,6 +409,84 @@ static ssize_t mute_state_set(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR(mute_state, 0664, mute_state_show, mute_state_set);
 
+/*
+ * frame: all four zones in one firmware call, for lighting driven from
+ * userspace many times a second (music, screen colours). Write
+ * "RRGGBB RRGGBB RRGGBB RRGGBB" (zone 0 to 3). Unlike the zone files it
+ * neither changes the saved colours nor writes the state file, and after
+ * the first frame it skips reading the lighting state back: one call
+ * (about 9 ms) instead of eight. The brightness setting still applies.
+ * A running animation is stopped.
+ */
+static DEFINE_MUTEX(frame_lock);
+static u8 frame_state[128];
+
+static ssize_t frame_show(struct device *dev, struct device_attribute *attr,
+			  char *buf)
+{
+	return sysfs_emit(buf, "Write 'RRGGBB RRGGBB RRGGBB RRGGBB' (zones 0-3) for live lighting\n");
+}
+
+static ssize_t frame_set(struct device *dev, struct device_attribute *attr,
+			 const char *buf, size_t count)
+{
+	struct platform_zone tmp;
+	char word[8];
+	const char *p = buf;
+	u8 z;
+	int ret;
+	struct color_platform colors[ZONE_COUNT];
+
+	for (z = 0; z < ZONE_COUNT; z++) {
+		size_t n = 0;
+
+		while (*p == ' ' || *p == '\t')
+			p++;
+		while (p[n] && p[n] != ' ' && p[n] != '\t' && p[n] != '\n' && n < 7)
+			n++;
+		if (n != 6)
+			return -EINVAL;
+		memcpy(word, p, 6);
+		word[6] = '\0';
+		ret = parse_rgb(word, &tmp);
+		if (ret)
+			return ret;
+		colors[z] = tmp.colors;
+		apply_brightness_to_color(&colors[z]);
+		p += n;
+	}
+
+	if (animation_active)
+		animation_halt();
+
+	mutex_lock(&frame_lock);
+	if (!frame_state_valid) {
+		ret = hp_wmi_perform_query(HPWMI_FOURZONE_COLOR_GET, HPWMI_FOURZONE,
+					   &frame_state, sizeof(frame_state), sizeof(frame_state));
+		if (ret) {
+			mutex_unlock(&frame_lock);
+			return ret <= 0 ? ret : -EIO;
+		}
+		frame_state_valid = true;
+	}
+	for (z = 0; z < ZONE_COUNT; z++) {
+		u8 off = zone_data[z].offset;
+
+		frame_state[off + 0] = colors[z].red;
+		frame_state[off + 1] = colors[z].green;
+		frame_state[off + 2] = colors[z].blue;
+		zone_data[z].colors = colors[z];
+	}
+	ret = hp_wmi_perform_query(HPWMI_FOURZONE_COLOR_SET, HPWMI_FOURZONE,
+				   &frame_state, sizeof(frame_state), sizeof(frame_state));
+	if (ret)
+		frame_state_valid = false;
+	mutex_unlock(&frame_lock);
+	return ret ? (ret <= 0 ? ret : -EIO) : count;
+}
+
+static DEVICE_ATTR(frame, 0664, frame_show, frame_set);
+
 int fourzone_setup(struct platform_device *dev)
 {
 	u8 zone;
@@ -413,7 +499,7 @@ int fourzone_setup(struct platform_device *dev)
 	if (!zone_dev_attrs)
 		return -ENOMEM;
 
-	zone_attrs = kcalloc(ZONE_COUNT + 9, sizeof(struct attribute *),
+	zone_attrs = kcalloc(ZONE_COUNT + 10, sizeof(struct attribute *),
 			     GFP_KERNEL);
 	if (!zone_attrs) {
 		ret = -ENOMEM;
@@ -475,7 +561,8 @@ int fourzone_setup(struct platform_device *dev)
 	zone_attrs[ZONE_COUNT + 5] = &dev_attr_mute_led.attr;
 	zone_attrs[ZONE_COUNT + 6] = &dev_attr_mute_state.attr;
 	zone_attrs[ZONE_COUNT + 7] = &brightness_lock_attr.attr;
-	zone_attrs[ZONE_COUNT + 8] = NULL; /* NULL terminate the array */
+	zone_attrs[ZONE_COUNT + 8] = &dev_attr_frame.attr;
+	zone_attrs[ZONE_COUNT + 9] = NULL; /* NULL terminate the array */
 
 	zone_attribute_group.attrs = zone_attrs;
 

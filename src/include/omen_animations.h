@@ -92,6 +92,7 @@ void animation_cleanup(void);
  * animation_start - Start currently selected animation
  */
 void animation_start(void);
+void animation_halt(void);
 
 /**
  * animation_stop - Stop current animation
