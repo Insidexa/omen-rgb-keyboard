@@ -2334,6 +2334,58 @@ static struct attribute_group fan_attr_group = {
 	.attrs = fan_attrs,
 };
 
+/*
+ * Battery charge control: HP WMI command 0x2B (BIOS methods GBCO/SBCO on
+ * board 8902). Read: byte 0 is the EC charge state (0 normal, 1 charging held,
+ * 2 on battery, 3 holding at low current, 5/6 special modes, 0xFF no battery),
+ * byte 2 is BATF. Write: {0, mode}. Only mode 0 (charge normally) and mode 1
+ * (stop charging on AC, run from the adapter) are allowed: the other modes
+ * force a discharge or put the battery in storage/ship mode.
+ */
+#define HPWMI_BATTERY_CHARGE	0x2B
+
+static ssize_t charge_control_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	u8 out[4] = {};
+	int ret;
+
+	ret = hp_wmi_perform_query(HPWMI_BATTERY_CHARGE, HPWMI_READ, out, 0, sizeof(out));
+	if (ret)
+		return ret < 0 ? ret : -EIO;
+	return sysfs_emit(buf, "%u %u %u %u\n", out[0], out[1], out[2], out[3]);
+}
+
+static ssize_t charge_control_store(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	u8 in[4] = {};
+	unsigned int mode;
+	int ret;
+
+	if (kstrtouint(buf, 0, &mode) || mode > 1)
+		return -EINVAL;
+	in[1] = mode;
+	ret = hp_wmi_perform_query(HPWMI_BATTERY_CHARGE, HPWMI_WRITE, in, sizeof(in), 0);
+	if (ret)
+		return ret < 0 ? ret : -EIO;
+	pr_info("battery charge control: mode %u\n", mode);
+	return count;
+}
+static DEVICE_ATTR_RW(charge_control);
+
+static struct attribute *battery_attrs[] = {
+	&dev_attr_charge_control.attr,
+	NULL,
+};
+
+static struct attribute_group battery_attr_group = {
+	.name = "battery",
+	.attrs = battery_attrs,
+};
+static bool battery_group_created;
+
 static void fan_max_rpm_save_work(struct work_struct *work)
 {
 	struct omen_max_rpm_state st;
@@ -2592,6 +2644,11 @@ int omen_fan_setup(struct platform_device *pdev)
 		return ret;
 	}
 
+	if (sysfs_create_group(&pdev->dev.kobj, &battery_attr_group))
+		pr_warn("failed to create battery sysfs group\n");
+	else
+		battery_group_created = true;
+
 	if (register_pm_notifier(&omen_fan_pm_nb))
 		pr_warn("Failed to install suspend notifier: fans stay on the curve during sleep\n");
 	else
@@ -2726,6 +2783,10 @@ void omen_fan_cleanup(void)
 	mutex_unlock(&fan_lock);
 
 	if (fan_pdev) {
+		if (battery_group_created) {
+			sysfs_remove_group(&fan_pdev->dev.kobj, &battery_attr_group);
+			battery_group_created = false;
+		}
 		sysfs_remove_group(&fan_pdev->dev.kobj, &fan_attr_group);
 		fan_pdev = NULL;
 	}
