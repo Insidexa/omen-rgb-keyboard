@@ -40,6 +40,7 @@
 #include <linux/notifier.h>
 #include <linux/platform_device.h>
 #include <linux/string.h>
+#include <linux/suspend.h>
 #include <linux/sysfs.h>
 #include <linux/uaccess.h>
 #include <linux/workqueue.h>
@@ -570,8 +571,17 @@ static bool fan_worker_needed_locked(void)
 	return false;
 }
 
+/*
+ * Set while the system goes to sleep: the curve worker stops and the EC owns
+ * the fans. A curve left at "0%" could otherwise hold the fans off while a
+ * suspend hangs half way, and the laptop heats up with nothing cooling it.
+ */
+static bool fan_sleeping;
+
 static void fan_curve_schedule_locked(void)
 {
+	if (fan_sleeping)
+		return;
 	if (fan_worker_needed_locked())
 		schedule_delayed_work(&fan_curve_work, 1);
 }
@@ -1210,7 +1220,7 @@ static void fan_curve_work_fn(struct work_struct *work)
 
 	mutex_lock(&fan_lock);
 
-	if (fan_rpm_learning || max_fan_manual) {
+	if (fan_sleeping || fan_rpm_learning || max_fan_manual) {
 		mutex_unlock(&fan_lock);
 		return;
 	}
@@ -2514,6 +2524,41 @@ static void fan_max_rpm_probe_work_fn(struct work_struct *work)
 		ret);
 }
 
+static int omen_fan_pm_event(struct notifier_block *nb, unsigned long action, void *data)
+{
+	switch (action) {
+	case PM_SUSPEND_PREPARE:
+	case PM_HIBERNATION_PREPARE:
+		mutex_lock(&fan_lock);
+		fan_sleeping = true;
+		mutex_unlock(&fan_lock);
+		cancel_delayed_work_sync(&fan_curve_work);
+		mutex_lock(&fan_lock);
+		if (fan_iface == OMEN_FAN_IF_VICTUS_S && !max_fan_state)
+			fan_victus_wmi_speed_set(HP_FAN_SPEED_AUTOMATIC);
+		curve_last_spd_valid = false;
+		cpu_curve.last_pct = -1;
+		gpu_curve.last_pct = -1;
+		mutex_unlock(&fan_lock);
+		break;
+	case PM_POST_SUSPEND:
+	case PM_POST_HIBERNATION:
+	case PM_POST_RESTORE:
+		mutex_lock(&fan_lock);
+		fan_sleeping = false;
+		curve_last_spd_valid = false;
+		fan_curve_schedule_locked();
+		mutex_unlock(&fan_lock);
+		break;
+	}
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block omen_fan_pm_nb = {
+	.notifier_call = omen_fan_pm_event,
+};
+static bool omen_fan_pm_nb_registered;
+
 int omen_fan_setup(struct platform_device *pdev)
 {
 	int ret;
@@ -2546,6 +2591,11 @@ int omen_fan_setup(struct platform_device *pdev)
 		fan_pdev = NULL;
 		return ret;
 	}
+
+	if (register_pm_notifier(&omen_fan_pm_nb))
+		pr_warn("Failed to install suspend notifier: fans stay on the curve during sleep\n");
+	else
+		omen_fan_pm_nb_registered = true;
 
 	power_source_nb.notifier_call = omen_powersource_event;
 	ret = register_acpi_notifier(&power_source_nb);
@@ -2647,6 +2697,11 @@ void omen_fan_cleanup(void)
 		platform_profile_registered = false;
 	}
 #endif
+
+	if (omen_fan_pm_nb_registered) {
+		unregister_pm_notifier(&omen_fan_pm_nb);
+		omen_fan_pm_nb_registered = false;
+	}
 
 	if (power_source_nb_registered) {
 		unregister_acpi_notifier(&power_source_nb);
