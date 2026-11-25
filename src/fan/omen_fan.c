@@ -189,6 +189,13 @@ static u32 fan_max_rpm_save_gpu;
 static bool fan_max_rpm_save_pending;
 static u8 curve_last_cpu_spd, curve_last_gpu_spd;
 static bool curve_last_spd_valid;
+/*
+ * The firmware can take the fans back (seen at 38 C with a 0% curve and both
+ * fans at ~2400 rpm), and the worker only sent a speed when it changed, so it
+ * never noticed. Send the same speed again at least this often.
+ */
+#define FAN_CURVE_RESEND_JIFFIES	msecs_to_jiffies(30000)
+static unsigned long curve_last_spd_sent;
 static struct delayed_work fan_curve_work;
 #if IS_ENABLED(CONFIG_THERMAL)
 static struct thermal_zone_device *curve_tz;
@@ -1288,7 +1295,8 @@ static void fan_curve_work_fn(struct work_struct *work)
 						  fan_gpu_tbl_min, fan_gpu_tbl_max);
 			if (!curve_last_spd_valid ||
 			    cpu_spd != curve_last_cpu_spd ||
-			    gpu_spd != curve_last_gpu_spd) {
+			    gpu_spd != curve_last_gpu_spd ||
+			    time_after(jiffies, curve_last_spd_sent + FAN_CURVE_RESEND_JIFFIES)) {
 				ret = fan_victus_wmi_speed_set_pair(cpu_spd, gpu_spd);
 				if (ret)
 					pr_debug("fan curve apply failed: %d\n", ret);
@@ -1296,10 +1304,12 @@ static void fan_curve_work_fn(struct work_struct *work)
 					curve_last_cpu_spd = cpu_spd;
 					curve_last_gpu_spd = gpu_spd;
 					curve_last_spd_valid = true;
+					curve_last_spd_sent = jiffies;
 				}
 			}
 		} else if (!curve_last_spd_valid ||
-			   cpu_spd != curve_last_cpu_spd) {
+			   cpu_spd != curve_last_cpu_spd ||
+			   time_after(jiffies, curve_last_spd_sent + FAN_CURVE_RESEND_JIFFIES)) {
 			ret = fan_victus_wmi_speed_set(cpu_spd);
 			if (ret)
 				pr_debug("fan curve apply failed: %d\n", ret);
@@ -1307,6 +1317,7 @@ static void fan_curve_work_fn(struct work_struct *work)
 				curve_last_cpu_spd = cpu_spd;
 				curve_last_gpu_spd = cpu_spd;
 				curve_last_spd_valid = true;
+				curve_last_spd_sent = jiffies;
 			}
 		}
 	}
