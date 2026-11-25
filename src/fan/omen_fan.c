@@ -2338,9 +2338,10 @@ static struct attribute_group fan_attr_group = {
  * Battery charge control: HP WMI command 0x2B (BIOS methods GBCO/SBCO on
  * board 8902). Read: byte 0 is the EC charge state (0 normal, 1 charging held,
  * 2 on battery, 3 holding at low current, 5/6 special modes, 0xFF no battery),
- * byte 2 is BATF. Write: {0, mode}. Only mode 0 (charge normally) and mode 1
- * (stop charging on AC, run from the adapter) are allowed: the other modes
- * force a discharge or put the battery in storage/ship mode.
+ * byte 2 is BATF. Write: {0, mode}. Allowed: 0 (no override, charge normally),
+ * 1 (accepted by the EC, keeps charging: purpose unknown) and 5 (the BIOS
+ * reports "idle on AC" for it: candidate for holding the charge). Modes 6 and
+ * 7 enter storage/ship states and the rest are untested: refused.
  */
 #define HPWMI_BATTERY_CHARGE	0x2B
 
@@ -2364,7 +2365,7 @@ static ssize_t charge_control_store(struct device *dev,
 	unsigned int mode;
 	int ret;
 
-	if (kstrtouint(buf, 0, &mode) || mode > 1)
+	if (kstrtouint(buf, 0, &mode) || (mode != 0 && mode != 1 && mode != 5))
 		return -EINVAL;
 	in[1] = mode;
 	ret = hp_wmi_perform_query(HPWMI_BATTERY_CHARGE, HPWMI_WRITE, in, sizeof(in), 0);
