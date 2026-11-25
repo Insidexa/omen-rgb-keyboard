@@ -2375,8 +2375,32 @@ static ssize_t charge_control_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(charge_control);
 
+/*
+ * Read-only view of the EC battery registers the BIOS uses for 0x2B (board
+ * 8902 ERAM offsets): BDVO 0x76 (request 0x40+mode; bit 7 = done, bits 4-5 =
+ * refused), MBST 0x82 (bit 0 discharging, bit 1 charging), MCUR 0x83-0x84
+ * (current), STOE 0x4C, BATF 0xD7, ADPP 0x40 bit 3 (adapter).
+ */
+static ssize_t ec_state_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	static const u8 regs[] = { 0x76, 0x82, 0x83, 0x84, 0x4C, 0xD7, 0x40 };
+	u8 v[ARRAY_SIZE(regs)];
+	int i, ret;
+
+	for (i = 0; i < ARRAY_SIZE(regs); i++) {
+		ret = ec_read(regs[i], &v[i]);
+		if (ret)
+			return ret;
+	}
+	return sysfs_emit(buf, "BDVO=%#04x MBST=%#04x MCUR=%u STOE=%#04x BATF=%#04x ADPP=%u\n",
+			  v[0], v[1], v[2] | (v[3] << 8), v[4], v[5], (v[6] >> 3) & 1);
+}
+static DEVICE_ATTR_RO(ec_state);
+
 static struct attribute *battery_attrs[] = {
 	&dev_attr_charge_control.attr,
+	&dev_attr_ec_state.attr,
 	NULL,
 };
 
